@@ -163,12 +163,17 @@ ${candidatesText}
 
 Instructions:
 1. Determine if any of the candidates lead to the official website of the AIF or its Managing AMC.
-2. Filter out financial aggregators, news sites, directory pages, and third-party databases.
-3. Assign a confidenceScore (0 to 100):
+2. CRITICAL: The "website" you output must be the ACTUAL official domain of the business, NOT the URL of the search result itself.
+   - If a candidate is a listing/profile page (e.g. Crunchbase, LinkedIn, Caplight, Tracxn, LEI registry), look inside the snippet or title for the real website domain mentioned there (e.g. "021.capital", "35northventures.com"). Output that real domain, not the listing page URL.
+   - If the candidate IS the official website itself (e.g. https://www.35northventures.com/), output that URL.
+   - If a candidate's snippet explicitly states the company's website (e.g. "Visit us at xyz.com" or lists a domain), use that domain.
+3. Filter out financial aggregators, news sites, directory pages, and third-party databases as the final "website" value — but you MAY read their snippets to extract the real domain.
+4. Assign a confidenceScore (0 to 100):
    - 90-100: Direct match to official entity/AMC domain.
-   - 70-89: Very likely match (e.g. parent company website).
-   - 40-69: Uncertain or third-party page (e.g. press release / directory).
+   - 70-89: Very likely match (e.g. parent company website extracted from a listing).
+   - 40-69: Uncertain — no real domain could be extracted, only a third-party page found.
    - 0-39: No relevant or official site found.
+5. Always output the website as a full URL with https:// prefix (e.g. "https://021.capital").
 
 Output the result as a JSON object with the keys: "website" (string or null), "confidenceScore" (number), and "reasoning" (string).
 `;
@@ -233,12 +238,78 @@ Output the result as a JSON object with the keys: "website" (string or null), "c
   }
 }
 
+/**
+ * Known listing/aggregator hosts that should never be the final "website" output.
+ * If the LLM still returns one of these despite prompt instructions, we reject it.
+ */
+const LISTING_SITE_HOSTS = new Set([
+  "caplight.com",
+  "crunchbase.com",
+  "tracxn.com",
+  "linkedin.com",
+  "scribd.com",
+  "filesure.in",
+  "tofler.in",
+  "zaubacorp.com",
+  "lei-lookup.com",
+  "indialei.in",
+  "gleif.org",
+  "bloomberg.com",
+  "moneycontrol.com",
+  "groww.in",
+  "occrp.org",
+  "justdial.com",
+  "indiamart.com",
+]);
+
+/**
+ * Post-processes the LLM output URL:
+ * - Rejects known listing/aggregator hosts entirely.
+ * - Normalizes to root domain (strips deep paths) for high-confidence official sites.
+ */
+function sanitizeWebsiteUrl(
+  result: WebsiteEnrichmentResult,
+): WebsiteEnrichmentResult {
+  if (!result.website) return result;
+
+  let url: URL;
+  try {
+    url = new URL(result.website);
+  } catch {
+    // Not a valid URL — clear it
+    return { ...result, website: undefined, confidenceScore: 0 };
+  }
+
+  const hostname = url.hostname.replace(/^www\./, "");
+
+  // Reject if it's a known listing/aggregator site
+  if (LISTING_SITE_HOSTS.has(hostname)) {
+    return {
+      ...result,
+      website: undefined,
+      confidenceScore: Math.min(result.confidenceScore, 30),
+      reasoning:
+        result.reasoning +
+        " [sanitized: listing-site URL rejected; no real business domain extracted]",
+    };
+  }
+
+  // For high-confidence hits, strip to root domain only (no deep paths)
+  if (result.confidenceScore >= 70) {
+    const root = `${url.protocol}//${url.hostname}`;
+    return { ...result, website: root };
+  }
+
+  return result;
+}
+
 export async function enrichWebsiteFromWeb(
   data: MessageContent,
 ): Promise<WebsiteEnrichmentResult | undefined> {
   try {
     const organicResults = await performSerperSearch(data);
-    return await evaluateCandidatesWithLLM(data, organicResults);
+    const raw = await evaluateCandidatesWithLLM(data, organicResults);
+    return sanitizeWebsiteUrl(raw);
   } catch (error) {
     console.error("Error in enrichWebsiteFromWeb:", error);
     return undefined;
