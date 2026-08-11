@@ -9,6 +9,7 @@ const envSchema = z.object({
   OAUTH_REFRESH_TOKEN: z.string().min(1, "OAUTH_REFRESH_TOKEN is required"),
   RABBITMQ_URL: z.url("Invalid RabbitMQ URL"),
   QUEUE_NAME: z.string().min(1).default("gsheet-etl"),
+  SERPER_API_KEY: z.string().min(1, "SERPER_API_KEY is required"),
 });
 
 export const env = envSchema.parse(Bun.env);

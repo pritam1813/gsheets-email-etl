@@ -1,8 +1,16 @@
 // worker.ts
 import { getRabbitChannel } from "./rabbitmq";
 import { env } from "./env";
+import { enrichWebsiteFromWeb } from "./scraper";
 // import { enrichWebsiteFromWeb } from "./your-scraping-logic";
 // import { updateSingleSheetRow } from "./your-sheets-logic";
+
+export interface MessageContent {
+  row: number;
+  aifName: string;
+  regAddress?: string;
+  correspondanceAddress?: string;
+}
 
 async function startWorker() {
   const { channel } = await getRabbitChannel();
@@ -18,11 +26,13 @@ async function startWorker() {
   channel.consume(env.QUEUE_NAME, async (msg) => {
     if (msg !== null) {
       try {
-        const data = JSON.parse(msg.content.toString());
+        const data: MessageContent = JSON.parse(msg.content.toString());
         console.log(`[x] Received task for Row: ${data.row}`);
 
         // 1. Do the heavy lifting (Web search, API calls, etc.)
-        // const website = await enrichWebsiteFromWeb(data);
+        const website = await enrichWebsiteFromWeb(data);
+
+        console.log("Proccesed data: ", website);
 
         // 2. Update Google Sheet for this specific row
         // await updateSingleSheetRow(data.row, website);
