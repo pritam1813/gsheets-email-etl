@@ -4,6 +4,7 @@ import { sheets } from "./config";
 import { genericEmails } from "./generic_emails";
 import { env } from "./env";
 import { getRabbitChannel } from "./rabbitmq";
+import { data } from "./batch_read";
 
 // --- Schemas ---
 
@@ -17,8 +18,8 @@ const ResSchema = z.array(BatchSheetsDataSchema);
 
 // --- Main ---
 
-const rawData = await Bun.file("data.json").json();
-const res = ResSchema.parse(rawData); // throws ZodError on bad shape
+// const rawData = await Bun.file("data.json").json();
+const res = ResSchema.parse(data); // throws ZodError on bad shape
 
 const { connection, channel } = await getRabbitChannel();
 
@@ -32,7 +33,10 @@ const COLS = {
 
 const rows = res[0]?.values ?? [];
 
-const domainValues: string[][] = [];
+const sheetName = env.SHEET_COL_UPDATE.split("!")[0] ?? "Sheet1";
+const websiteCol = env.SHEET_COL_UPDATE.split("!")[1]?.replace(/[^A-Za-z]/g, "")[0] ?? "E";
+
+const requests: sheets_v4.Schema$ValueRange[] = [];
 
 for (let index = 0; index < rows.length; index++) {
   const row = rows[index];
@@ -45,15 +49,16 @@ for (let index = 0; index < rows.length; index++) {
   const correspondanceAddress = row[COLS.COR_ADDRESS];
 
   if (existingWebsite) {
-    domainValues.push([existingWebsite]);
+    // Already has a website, don't overwrite it
     continue;
   }
 
   const domain = email?.split("@")[1]?.toLowerCase();
+  const rowNum = index + env.START_ROW_NO;
 
   if (!email || !domain || genericEmails.has(domain)) {
     const payload = {
-      row: index + env.START_ROW_NO,
+      row: rowNum,
       aifName,
       regAddress,
       correspondanceAddress,
@@ -62,21 +67,20 @@ for (let index = 0; index < rows.length; index++) {
     channel.sendToQueue(env.QUEUE_NAME, Buffer.from(JSON.stringify(payload)), {
       persistent: true,
     });
-
-    domainValues.push([""]);
+    // We NO LONGER push an empty string here to avoid overwriting!
   } else {
-    domainValues.push([`https://${domain}`]);
+    // Update ONLY this specific cell
+    requests.push({
+      range: `${sheetName}!${websiteCol}${rowNum}`,
+      values: [[`https://${domain}`]],
+    });
   }
 }
 
 await channel.close();
 await connection.close();
 
-const requests: sheets_v4.Schema$ValueRange[] = [
-  { range: env.SHEET_COL_UPDATE, values: domainValues },
-];
-
-if (env.SPREADSHEET_ID) {
+if (env.SPREADSHEET_ID && requests.length > 0) {
   await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: env.SPREADSHEET_ID,
     requestBody: { valueInputOption: "USER_ENTERED", data: requests },

@@ -2,7 +2,7 @@
 import { getRabbitChannel } from "./rabbitmq";
 import { env } from "./env";
 import { enrichWebsiteFromWeb } from "./scraper";
-import { updateSingleSheetRow } from "./sheets";
+import { updateSingleSheetRow, isRowAlreadyProcessed } from "./sheets";
 
 /** Writes directly to stdout so logs flush immediately (bypasses Bun buffering). */
 const log = (...args: unknown[]) =>
@@ -35,6 +35,14 @@ async function startWorker() {
       try {
         const data: MessageContent = JSON.parse(msg.content.toString());
         log(`[x] Received task for Row: ${data.row}`);
+
+        // 0. Check if already updated in the sheet
+        const isProcessed = await isRowAlreadyProcessed(data.row);
+        if (isProcessed) {
+          log(`[~] Row ${data.row} already has data in the sheet. Skipping.`);
+          channel.ack(msg);
+          return;
+        }
 
         // 1. Do the heavy lifting (Web search, API calls, etc.)
         const result = await enrichWebsiteFromWeb(data);

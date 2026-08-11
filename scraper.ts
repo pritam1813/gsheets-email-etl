@@ -121,6 +121,7 @@ async function performSerperSearch(
     headers: serperHeaders,
     body: JSON.stringify({ q: query, num: 8 }), // fetch 8, LLM will filter
     redirect: "follow",
+    signal: AbortSignal.timeout(15000), // 15 second timeout
   });
 
   if (!serperResponse.ok) {
@@ -199,6 +200,7 @@ Output the result as a JSON object with the keys: "website" (string or null), "c
         temperature: 0.0,
       },
     }),
+    signal: AbortSignal.timeout(60000), // 60 second timeout for LLM inference
   });
 
   if (!ollamaResponse.ok) {
@@ -210,11 +212,7 @@ Output the result as a JSON object with the keys: "website" (string or null), "c
     const raw: string = result.response ?? "";
 
     if (!raw.trim()) {
-      return {
-        website: undefined,
-        confidenceScore: 0,
-        reasoning: "Empty response from Ollama.",
-      };
+      throw new Error("Empty response from Ollama.");
     }
 
     const parsed = JSON.parse(raw) as {
@@ -228,13 +226,9 @@ Output the result as a JSON object with the keys: "website" (string or null), "c
       confidenceScore: parsed.confidenceScore,
       reasoning: parsed.reasoning,
     };
-  } catch {
-    console.warn("Failed to parse Ollama JSON. Raw output:", result.response);
-    return {
-      website: undefined,
-      confidenceScore: 0,
-      reasoning: "Failed to parse LLM response.",
-    };
+  } catch (err) {
+    console.warn("Failed to parse Ollama JSON or received empty output. Raw output:", result.response);
+    throw err; // Throw error to fail the task, instead of returning 0% confidence mock data
   }
 }
 
@@ -307,11 +301,16 @@ export async function enrichWebsiteFromWeb(
   data: MessageContent,
 ): Promise<WebsiteEnrichmentResult | undefined> {
   try {
+    console.log(`[Row ${data.row}] Calling Serper API...`);
     const organicResults = await performSerperSearch(data);
+    
+    console.log(`[Row ${data.row}] Calling Ollama API...`);
     const raw = await evaluateCandidatesWithLLM(data, organicResults);
+    
+    console.log(`[Row ${data.row}] Finished processing LLM response.`);
     return sanitizeWebsiteUrl(raw);
   } catch (error) {
-    console.error("Error in enrichWebsiteFromWeb:", error);
-    return undefined;
+    console.error(`Error in enrichWebsiteFromWeb (Row ${data.row}):`, error);
+    throw error; // Rethrow so worker.ts can catch it and nack the message!
   }
 }

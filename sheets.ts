@@ -30,6 +30,23 @@ function rowToRange(row: number): string {
  *   - Col +1 (e.g. F): confidence score
  *   - Col +2 (e.g. G): reasoning
  */
+export async function isRowAlreadyProcessed(row: number): Promise<boolean> {
+  const range = rowToRange(row);
+  
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: env.SPREADSHEET_ID,
+    range,
+  });
+
+  const values = response.data.values;
+  if (!values || !values[0] || values[0].length === 0) {
+    return false;
+  }
+  
+  // Return true if ANY cell in the range (Website, Confidence Score, or Reasoning) has data
+  return values[0].some((cell) => typeof cell === "string" && cell.trim() !== "");
+}
+
 export async function updateSingleSheetRow(
   row: number,
   result: WebsiteEnrichmentResult | undefined,
