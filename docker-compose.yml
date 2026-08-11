@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"   # AMQP protocol port
+      - "15672:15672" # Management UI port
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gsheets-worker
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Point to the docker container instead of localhost
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+    restart: unless-stopped
+
+  # The orchestrator is a one-off script.
+  # We use a profile so it doesn't start automatically on `docker compose up`.
+  # Run it manually with: `docker compose run --rm orchestrator`
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles:
+      - manual
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+    command: ["bun", "run", "orchestrator.ts"]
+
+volumes:
+  rabbitmq_data:
