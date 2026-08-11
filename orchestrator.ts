@@ -3,7 +3,7 @@ import * as z from "zod";
 import { sheets } from "./config";
 import { genericEmails } from "./generic_emails";
 import { env } from "./env";
-import { publisher } from "./redis";
+import { getRabbitChannel } from "./rabbitmq";
 
 // --- Schemas ---
 
@@ -15,61 +15,68 @@ const BatchSheetsDataSchema = z.object({
 
 const ResSchema = z.array(BatchSheetsDataSchema);
 
-// --- Helpers ---
-await publisher.connect();
-
-async function publishLogMessage(
-  index: number,
-  aifNames: string[][],
-  regAddresses: string[][],
-  correspondanceAddresses: string[][],
-) {
-  const message = {
-    row: index + env.START_ROW_NO,
-    aifName: aifNames[index]?.[0],
-    regAddress: regAddresses[index]?.[0],
-    correspondanceAddress: correspondanceAddresses[index]?.[0],
-  };
-
-  await publisher.publish(env.REDIS_CHANNEL, JSON.stringify(message));
-}
-
 // --- Main ---
 
 const rawData = await Bun.file("data.json").json();
 const res = ResSchema.parse(rawData); // throws ZodError on bad shape
 
-const aifNames = res[0]?.values ?? [];
-const emailValues = res[1]?.values ?? [];
-const regAddresses = res[2]?.values ?? [];
-const correspondanceAddresses = res[3]?.values ?? [];
+const { connection, channel } = await getRabbitChannel();
 
-const domainValues: string[][] = await Promise.all(
-  emailValues.map(async (item, index) => {
-    const email = item[0];
-    const domain = email?.split("@")[1]?.toLowerCase();
+const COLS = {
+  AIF_NAME: 0,
+  EMAIL: 7,
+  REG_ADDRESS: 13,
+  COR_ADDRESS: 17,
+  WEBSITE: 3,
+} as const;
 
-    if (!email || !domain || genericEmails.has(domain)) {
-      await publishLogMessage(
-        index,
-        aifNames,
-        regAddresses,
-        correspondanceAddresses,
-      );
-      return [""];
-    }
+const rows = res[0]?.values ?? [];
 
-    return [`https://${domain}`];
-  }),
-);
+const domainValues: string[][] = [];
 
-publisher.close();
+for (let index = 0; index < rows.length; index++) {
+  const row = rows[index];
+  if (!row) continue;
+
+  const email = row[COLS.EMAIL];
+  const existingWebsite = row[COLS.WEBSITE];
+  const aifName = row[COLS.AIF_NAME];
+  const regAddress = row[COLS.REG_ADDRESS];
+  const correspondanceAddress = row[COLS.COR_ADDRESS];
+
+  if (existingWebsite) {
+    domainValues.push([existingWebsite]);
+    continue;
+  }
+
+  const domain = email?.split("@")[1]?.toLowerCase();
+
+  if (!email || !domain || genericEmails.has(domain)) {
+    const payload = {
+      row: index + env.START_ROW_NO,
+      aifName,
+      regAddress,
+      correspondanceAddress,
+    };
+
+    channel.sendToQueue(env.QUEUE_NAME, Buffer.from(JSON.stringify(payload)), {
+      persistent: true,
+    });
+
+    domainValues.push([""]);
+  } else {
+    domainValues.push([`https://${domain}`]);
+  }
+}
+
+await channel.close();
+await connection.close();
 
 const requests: sheets_v4.Schema$ValueRange[] = [
   { range: env.SHEET_COL_UPDATE, values: domainValues },
 ];
 
-// console.log(requests);
+console.log(requests);
 
 // if (env.SPREADSHEET_ID) {
 //   await sheets.spreadsheets.values.batchUpdate({

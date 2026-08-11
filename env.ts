@@ -7,8 +7,8 @@ const envSchema = z.object({
   OAUTH_CLIENT_ID: z.string().min(1, "OAUTH_CLIENT_ID is required"),
   OAUTH_CLIENT_SECRET: z.string().min(1, "OAUTH_CLIENT_SECRET is required"),
   OAUTH_REFRESH_TOKEN: z.string().min(1, "OAUTH_REFRESH_TOKEN is required"),
-  REDIS_URL: z.url("Invalid Redis URL"),
-  REDIS_CHANNEL: z.string().min(1).default("email-audit"),
+  RABBITMQ_URL: z.url("Invalid RabbitMQ URL"),
+  QUEUE_NAME: z.string().min(1).default("gsheet-etl"),
 });
 
 export const env = envSchema.parse(Bun.env);
