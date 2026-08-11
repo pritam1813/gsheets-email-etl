@@ -1,22 +1,68 @@
+import type { sheets_v4 } from "@googleapis/sheets";
+import * as z from "zod";
 import { sheets } from "./config";
+import { genericEmails } from "./generic_emails";
+import { env } from "./types";
 
-export async function getSpreadsheetData() {
-  try {
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId: Bun.env.SPREADSHEET_ID,
-      range: `${Bun.env.SHEET_NAME}!${Bun.env.SHEET_START}:${Bun.env.SHEET_END}`,
-    });
-    return response.data;
-  } catch (error) {
-    console.error(error);
-    process.exit(1);
-  }
+// --- Schemas ---
+
+const BatchSheetsDataSchema = z.object({
+  range: z.string(),
+  majorDimension: z.string(),
+  values: z.array(z.array(z.string())).optional(),
+});
+
+const ResSchema = z.array(BatchSheetsDataSchema);
+
+// --- Helpers ---
+
+function buildLogMessage(
+  index: number,
+  aifNames: string[][],
+  regAddresses: string[][],
+  correspondanceAddresses: string[][],
+) {
+  return {
+    row: index + env.START_ROW_NO,
+    aifName: aifNames[index]?.[0],
+    regAddress: regAddresses[index]?.[0],
+    correspondanceAddress: correspondanceAddresses[index]?.[0],
+  };
 }
 
-const data = await getSpreadsheetData();
+// --- Main ---
 
-export const rowsWithNumbers =
-  data.values?.map((row, index) => ({
-    row: index + 1,
-    value: row[0] ?? null,
-  })) ?? [];
+const rawData = await Bun.file("data.json").json();
+const res = ResSchema.parse(rawData); // throws ZodError on bad shape
+
+const aifNames = res[0]?.values ?? [];
+const emailValues = res[1]?.values ?? [];
+const regAddresses = res[2]?.values ?? [];
+const correspondanceAddresses = res[3]?.values ?? [];
+
+const domainValues: string[][] = emailValues.map((item, index) => {
+  const email = item[0];
+  const domain = email?.split("@")[1]?.toLowerCase();
+
+  if (!email || !domain || genericEmails.has(domain)) {
+    console.log(
+      buildLogMessage(index, aifNames, regAddresses, correspondanceAddresses),
+    );
+    return [""];
+  }
+
+  return [`https://${domain}`];
+});
+
+const requests: sheets_v4.Schema$ValueRange[] = [
+  { range: env.SHEET_COL_UPDATE, values: domainValues },
+];
+
+console.log(requests);
+
+// if (env.SPREADSHEET_ID) {
+//   await sheets.spreadsheets.values.batchUpdate({
+//     spreadsheetId: env.SPREADSHEET_ID,
+//     requestBody: { valueInputOption: "USER_ENTERED", data: requests },
+//   });
+// }
