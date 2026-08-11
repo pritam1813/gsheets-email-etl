@@ -76,11 +76,9 @@ const requests: sheets_v4.Schema$ValueRange[] = [
   { range: env.SHEET_COL_UPDATE, values: domainValues },
 ];
 
-console.log(requests);
-
-// if (env.SPREADSHEET_ID) {
-//   await sheets.spreadsheets.values.batchUpdate({
-//     spreadsheetId: env.SPREADSHEET_ID,
-//     requestBody: { valueInputOption: "USER_ENTERED", data: requests },
-//   });
-// }
+if (env.SPREADSHEET_ID) {
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: env.SPREADSHEET_ID,
+    requestBody: { valueInputOption: "USER_ENTERED", data: requests },
+  });
+}

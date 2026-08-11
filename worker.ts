@@ -2,8 +2,15 @@
 import { getRabbitChannel } from "./rabbitmq";
 import { env } from "./env";
 import { enrichWebsiteFromWeb } from "./scraper";
-// import { enrichWebsiteFromWeb } from "./your-scraping-logic";
-// import { updateSingleSheetRow } from "./your-sheets-logic";
+import { updateSingleSheetRow } from "./sheets";
+
+/** Writes directly to stdout so logs flush immediately (bypasses Bun buffering). */
+const log = (...args: unknown[]) =>
+  process.stdout.write(
+    args
+      .map((a) => (typeof a === "string" ? a : JSON.stringify(a, null, 2)))
+      .join(" ") + "\n",
+  );
 
 export interface MessageContent {
   row: number;
@@ -27,21 +34,19 @@ async function startWorker() {
     if (msg !== null) {
       try {
         const data: MessageContent = JSON.parse(msg.content.toString());
-        console.log(`[x] Received task for Row: ${data.row}`);
+        log(`[x] Received task for Row: ${data.row}`);
 
         // 1. Do the heavy lifting (Web search, API calls, etc.)
-        const website = await enrichWebsiteFromWeb(data);
-
-        console.log("Proccesed data: ", website);
+        const result = await enrichWebsiteFromWeb(data);
 
         // 2. Update Google Sheet for this specific row
-        // await updateSingleSheetRow(data.row, website);
+        await updateSingleSheetRow(data.row, result);
 
         // 3. IMPORTANT: Tell RabbitMQ the job is successfully done
         channel.ack(msg);
-        console.log(`[v] Successfully processed Row: ${data.row}`);
+        log(`[v] Successfully wrote Row: ${data.row} to sheet`);
       } catch (error) {
-        console.error(`[!] Failed to process message:`, error);
+        process.stderr.write(`[!] Failed to process message: ${error}\n`);
 
         // Tell RabbitMQ we failed.
         // The 'false' parameter means "do NOT requeue this immediately"
