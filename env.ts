@@ -10,6 +10,7 @@ const envSchema = z.object({
   RABBITMQ_URL: z.url("Invalid RabbitMQ URL"),
   QUEUE_NAME: z.string().min(1).default("gsheet-etl"),
   SERPER_API_KEY: z.string().min(1, "SERPER_API_KEY is required"),
+  GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
 });
 
 export const env = envSchema.parse(Bun.env);

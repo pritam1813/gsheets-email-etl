@@ -3,7 +3,7 @@ import type { MessageContent } from "./worker";
 
 export interface WebsiteEnrichmentResult {
   website?: string;
-  confidenceScore: number; // 0 to 100
+  confidenceScore: number;
   reasoning?: string;
 }
 
@@ -18,54 +18,100 @@ interface SerperResponse {
   organic?: SerperOrganicResult[];
 }
 
-/**
- * Extracts city from a typical Indian address string.
- * Pattern: "..., Area, City, CITY_CAPS, STATE, 560102"
- */
+// ─── Gemini Rate Limiter ────────────────────────────────────────────────────
+// Tune these to match the model you pick from AI Studio dashboard.
+//
+// Model               RPM   RPD
+// gemini-2.5-flash     5     20   ← you're already over this
+// gemini-2.5-flash-lite 10   20
+// gemini-3.5-flash-lite 15  500   ← recommended
+// gemini-3.1-flash-lite 15  500
+
+const GEMINI_MODEL = "gemini-3.5-flash-lite"; // change to preferred model
+const GEMINI_RPM_LIMIT = 15; // match the model's RPM above
+const GEMINI_RPD_LIMIT = 500; // match the model's RPD above
+
+class GeminiRateLimiter {
+  private minuteWindow: number[] = []; // timestamps of recent requests
+  private dailyCount = 0;
+  private dayStartMs = Date.now();
+
+  async throttle(): Promise<void> {
+    const now = Date.now();
+
+    // Reset daily counter when 24h window has elapsed
+    if (now - this.dayStartMs >= 24 * 60 * 60 * 1000) {
+      this.dailyCount = 0;
+      this.dayStartMs = now;
+    }
+
+    if (this.dailyCount >= GEMINI_RPD_LIMIT) {
+      throw new Error(
+        `Gemini RPD limit (${GEMINI_RPD_LIMIT}/day) reached. Retry after midnight UTC.`,
+      );
+    }
+
+    // Sliding 60-second window for RPM
+    const windowCutoff = now - 60_000;
+    this.minuteWindow = this.minuteWindow.filter((t) => t > windowCutoff);
+
+    if (this.minuteWindow.length >= GEMINI_RPM_LIMIT) {
+      // Wait until the oldest request in the window expires
+      const oldestTs = this.minuteWindow[0]!;
+      const waitMs = oldestTs + 60_000 - now + 200; // 200ms safety buffer
+      console.log(`[Gemini] RPM limit reached. Waiting ${waitMs}ms...`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+
+    this.minuteWindow.push(Date.now());
+    this.dailyCount++;
+  }
+
+  get stats() {
+    return {
+      rpm: `${this.minuteWindow.length}/${GEMINI_RPM_LIMIT}`,
+      rpd: `${this.dailyCount}/${GEMINI_RPD_LIMIT}`,
+    };
+  }
+}
+
+// Singleton — shared across all calls in this process
+const geminiRateLimiter = new GeminiRateLimiter();
+
+// ─── Serper search (unchanged) ──────────────────────────────────────────────
+
 function extractCity(regAddress: string): string {
   const parts = regAddress
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-
-  // Find the 6-digit pincode index and walk back to the city
   const pincodeIdx = parts.findIndex((p) => /^\d{6}$/.test(p));
   if (pincodeIdx >= 2) {
-    // Layout: [..., city, CITY_CAPS, STATE, PINCODE]
-    // So city is at pincodeIdx - 3, or pincodeIdx - 2 at minimum
     return parts[pincodeIdx - 3] ?? parts[pincodeIdx - 2] ?? parts[0] ?? "";
   }
   return parts[Math.max(0, parts.length - 3)] ?? "";
 }
 
-/**
- * Strips fund series suffixes and generic trust/fund words
- * so the search targets the AMC/manager entity rather than the specific tranche.
- * "021 CAPITAL TRUST - II" → "021 CAPITAL"
- */
 function extractAMCKeyword(aifName: string): string {
   return aifName
-    .replace(/\s*[-–]\s*(I{1,4}|IV|VI{0,3}|IX|X|\d{1,2})\s*$/i, "") // - II, - III, - 2, etc.
+    .replace(/\s*[-–]\s*(I{1,4}|IV|VI{0,3}|IX|X|\d{1,2})\s*$/i, "")
     .replace(/\b(TRUST|FUND|SCHEME|PLAN|SERIES|CLASS)\b/gi, "")
     .replace(/\s{2,}/g, " ")
     .trim();
 }
 
 const EXCLUDED_SITES = [
-  // Indian LEI registries
   "indialei.in",
   "globallei.in",
   "register-lei.in",
   "lei-worldwide.com",
   "gleif.org",
   "piedalies.lv",
-  // Indian company/regulatory databases
   "sebi.gov.in",
   "mca.gov.in",
   "zaubacorp.com",
   "tofler.in",
   "occrp.org",
-  // Financial aggregators
   "esi.in",
   "moneycontrol.com",
   "screener.in",
@@ -75,13 +121,11 @@ const EXCLUDED_SITES = [
   "morningstar.in",
   "groww.in",
   "etmoney.com",
-  // News
   "bloomberg.com",
   "economictimes.indiatimes.com",
   "livemint.com",
   "businessstandard.com",
   "financialexpress.com",
-  // Generic
   "linkedin.com",
   "crunchbase.com",
   "tracxn.com",
@@ -98,9 +142,6 @@ async function performSerperSearch(
   const city = extractCity(String(data.regAddress ?? ""));
   const amcKeyword = extractAMCKeyword(data.aifName);
 
-  // Two signals:
-  // 1. Exact full AIF name for direct hits
-  // 2. Stripped AMC keyword + city to find the managing entity's site
   const query = [
     `"${data.aifName}" OR "${amcKeyword}"`,
     city ? `"${city}"` : "",
@@ -119,9 +160,9 @@ async function performSerperSearch(
   const serperResponse = await fetch("https://google.serper.dev/search", {
     method: "POST",
     headers: serperHeaders,
-    body: JSON.stringify({ q: query, num: 8 }), // fetch 8, LLM will filter
+    body: JSON.stringify({ q: query, num: 8 }),
     redirect: "follow",
-    signal: AbortSignal.timeout(15000), // 15 second timeout
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!serperResponse.ok) {
@@ -131,6 +172,8 @@ async function performSerperSearch(
   const serperResult: SerperResponse = await serperResponse.json();
   return serperResult.organic?.slice(0, 8) ?? [];
 }
+
+// ─── LLM: Gemini ────────────────────────────────────────────────────────────
 
 async function evaluateCandidatesWithLLM(
   data: MessageContent,
@@ -143,13 +186,14 @@ async function evaluateCandidatesWithLLM(
       reasoning: "No organic search results found.",
     };
   }
+
   const candidatesText = organicResults
     .map(
       (item, index) =>
         `[Candidate ${index + 1}]
-      Title: ${item.title}
-      URL: ${item.link}
-      Snippet: ${item.snippet}`,
+Title: ${item.title}
+URL: ${item.link}
+Snippet: ${item.snippet}`,
     )
     .join("\n\n");
 
@@ -165,56 +209,65 @@ ${candidatesText}
 Instructions:
 1. Determine if any of the candidates lead to the official website of the AIF or its Managing AMC.
 2. CRITICAL: The "website" you output must be the ACTUAL official domain of the business, NOT the URL of the search result itself.
-   - If a candidate is a listing/profile page (e.g. Crunchbase, LinkedIn, Caplight, Tracxn, LEI registry), look inside the snippet or title for the real website domain mentioned there (e.g. "021.capital", "35northventures.com"). Output that real domain, not the listing page URL.
-   - If the candidate IS the official website itself (e.g. https://www.35northventures.com/), output that URL.
-   - If a candidate's snippet explicitly states the company's website (e.g. "Visit us at xyz.com" or lists a domain), use that domain.
+   - If a candidate is a listing/profile page (e.g. Crunchbase, LinkedIn, Caplight, Tracxn, LEI registry), look inside the snippet or title for the real website domain mentioned there (e.g. "021.capital"). Output that real domain, not the listing page URL.
+   - If the candidate IS the official website itself, output that URL directly.
+   - If a candidate's snippet explicitly states the company's website, use that domain.
 3. Filter out financial aggregators, news sites, directory pages, and third-party databases as the final "website" value — but you MAY read their snippets to extract the real domain.
 4. Assign a confidenceScore (0 to 100):
    - 90-100: Direct match to official entity/AMC domain.
    - 70-89: Very likely match (e.g. parent company website extracted from a listing).
    - 40-69: Uncertain — no real domain could be extracted, only a third-party page found.
    - 0-39: No relevant or official site found.
-5. Always output the website as a full URL with https:// prefix (e.g. "https://021.capital").
+5. Always output the website as a full URL with https:// prefix. Set to null if nothing credible found.
+`.trim();
 
-Output the result as a JSON object with the keys: "website" (string or null), "confidenceScore" (number), and "reasoning" (string).
-`;
+  // Respect Gemini rate limits before firing the request
+  await geminiRateLimiter.throttle();
+  console.log(
+    `[Row ${data.row}] Gemini usage → ${JSON.stringify(geminiRateLimiter.stats)}`,
+  );
 
-  const ollamaResponse = await fetch("http://127.0.0.1:11434/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "qwen3.5:4b",
-      prompt: prompt,
-      think: false,
-      stream: false,
-      format: {
-        type: "object",
-        properties: {
-          website: { type: ["string", "null"] }, // ✅ allow null
-          confidenceScore: { type: "number" },
-          reasoning: { type: "string" },
+  const geminiResponse = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${env.GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              website: { type: "STRING", nullable: true },
+              confidenceScore: { type: "NUMBER" },
+              reasoning: { type: "STRING" },
+            },
+            required: ["website", "confidenceScore", "reasoning"],
+          },
         },
-        required: ["website", "confidenceScore", "reasoning"], // ✅ require all fields
-      },
-      options: {
-        temperature: 0.0,
-      },
-    }),
-    signal: AbortSignal.timeout(60000), // 60 second timeout for LLM inference
-  });
+      }),
+      signal: AbortSignal.timeout(30_000),
+    },
+  );
 
-  if (!ollamaResponse.ok) {
-    throw new Error(`Ollama API error: ${ollamaResponse.statusText}`);
+  if (!geminiResponse.ok) {
+    const errBody = await geminiResponse.text();
+    throw new Error(`Gemini API error ${geminiResponse.status}: ${errBody}`);
   }
 
-  const result = await ollamaResponse.json();
+  const geminiJson = await geminiResponse.json();
+
+  // Gemini response shape: candidates[0].content.parts[0].text
+  const raw: string =
+    geminiJson?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+
+  if (!raw.trim()) {
+    throw new Error("Empty response from Gemini.");
+  }
+
   try {
-    const raw: string = result.response ?? "";
-
-    if (!raw.trim()) {
-      throw new Error("Empty response from Ollama.");
-    }
-
     const parsed = JSON.parse(raw) as {
       website: string | null;
       confidenceScore: number;
@@ -227,15 +280,13 @@ Output the result as a JSON object with the keys: "website" (string or null), "c
       reasoning: parsed.reasoning,
     };
   } catch (err) {
-    console.warn("Failed to parse Ollama JSON or received empty output. Raw output:", result.response);
-    throw err; // Throw error to fail the task, instead of returning 0% confidence mock data
+    console.warn("Failed to parse Gemini JSON. Raw output:", raw);
+    throw err;
   }
 }
 
-/**
- * Known listing/aggregator hosts that should never be the final "website" output.
- * If the LLM still returns one of these despite prompt instructions, we reject it.
- */
+// ─── Post-processing (unchanged) ────────────────────────────────────────────
+
 const LISTING_SITE_HOSTS = new Set([
   "caplight.com",
   "crunchbase.com",
@@ -256,11 +307,6 @@ const LISTING_SITE_HOSTS = new Set([
   "indiamart.com",
 ]);
 
-/**
- * Post-processes the LLM output URL:
- * - Rejects known listing/aggregator hosts entirely.
- * - Normalizes to root domain (strips deep paths) for high-confidence official sites.
- */
 function sanitizeWebsiteUrl(
   result: WebsiteEnrichmentResult,
 ): WebsiteEnrichmentResult {
@@ -270,13 +316,11 @@ function sanitizeWebsiteUrl(
   try {
     url = new URL(result.website);
   } catch {
-    // Not a valid URL — clear it
     return { ...result, website: undefined, confidenceScore: 0 };
   }
 
   const hostname = url.hostname.replace(/^www\./, "");
 
-  // Reject if it's a known listing/aggregator site
   if (LISTING_SITE_HOSTS.has(hostname)) {
     return {
       ...result,
@@ -288,14 +332,14 @@ function sanitizeWebsiteUrl(
     };
   }
 
-  // For high-confidence hits, strip to root domain only (no deep paths)
   if (result.confidenceScore >= 70) {
-    const root = `${url.protocol}//${url.hostname}`;
-    return { ...result, website: root };
+    return { ...result, website: `${url.protocol}//${url.hostname}` };
   }
 
   return result;
 }
+
+// ─── Public entry point ──────────────────────────────────────────────────────
 
 export async function enrichWebsiteFromWeb(
   data: MessageContent,
@@ -303,14 +347,14 @@ export async function enrichWebsiteFromWeb(
   try {
     console.log(`[Row ${data.row}] Calling Serper API...`);
     const organicResults = await performSerperSearch(data);
-    
-    console.log(`[Row ${data.row}] Calling Ollama API...`);
+
+    console.log(`[Row ${data.row}] Calling Gemini API...`);
     const raw = await evaluateCandidatesWithLLM(data, organicResults);
-    
-    console.log(`[Row ${data.row}] Finished processing LLM response.`);
+
+    console.log(`[Row ${data.row}] Done.`);
     return sanitizeWebsiteUrl(raw);
   } catch (error) {
     console.error(`Error in enrichWebsiteFromWeb (Row ${data.row}):`, error);
-    throw error; // Rethrow so worker.ts can catch it and nack the message!
+    throw error;
   }
 }
