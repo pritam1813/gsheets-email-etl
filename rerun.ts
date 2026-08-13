@@ -76,7 +76,8 @@ function extractStartRow(range: string): number {
 }
 
 async function processRow(rowNum: number, entityDetails: any) {
-  const { name, regNo, regAddress, corAddress, contactPerson, email } = entityDetails;
+  const { name, regNo, regAddress, corAddress, contactPerson, email } =
+    entityDetails;
 
   const prompt = `
 Task: Find the official website associated with the following registered entity. 
@@ -186,7 +187,7 @@ async function main() {
     const confScore = parseInt(confScoreStr.replace("%", ""), 10) || 0;
 
     // Condition: confidence < 75 and cell is not empty
-    if (confScoreStr.trim() !== "" && confScore < 75) {
+    if (confScoreStr.trim() !== "" && confScore > 70 && confScore < 90) {
       console.log(`\n--- Processing Row ${rowNum} ---`);
 
       const entityDetails = {
@@ -207,18 +208,33 @@ async function main() {
         try {
           await processRow(rowNum, entityDetails);
           success = true;
-          logToFile(`[Row ${rowNum}] Successfully processed on attempt ${attempts}.`);
+          logToFile(
+            `[Row ${rowNum}] Successfully processed on attempt ${attempts}.`,
+          );
         } catch (err: any) {
-          const isRetryable = err?.status === 503 || err?.message?.includes("503") || err?.status === 429 || err?.message?.includes("429");
-          
+          const isRetryable =
+            err?.status === 503 ||
+            err?.message?.includes("503") ||
+            err?.status === 429 ||
+            err?.message?.includes("429");
+
           if (isRetryable && attempts < MAX_RETRIES) {
             const waitTime = attempts * 15000; // 15s, 30s, 45s...
-            console.warn(`[Row ${rowNum}] Got retryable error (503/429). Retrying in ${waitTime/1000}s (Attempt ${attempts} of ${MAX_RETRIES})...`);
-            logToFile(`[Row ${rowNum}] Got retryable error. Retrying (Attempt ${attempts})...`);
-            await new Promise(res => setTimeout(res, waitTime));
+            console.warn(
+              `[Row ${rowNum}] Got retryable error (503/429). Retrying in ${waitTime / 1000}s (Attempt ${attempts} of ${MAX_RETRIES})...`,
+            );
+            logToFile(
+              `[Row ${rowNum}] Got retryable error. Retrying (Attempt ${attempts})...`,
+            );
+            await new Promise((res) => setTimeout(res, waitTime));
           } else {
-            console.error(`[Row ${rowNum}] Error processing row after ${attempts} attempts:`, err);
-            logToFile(`[Row ${rowNum}] FAILED after ${attempts} attempts. Error: ${err?.message || String(err)}`);
+            console.error(
+              `[Row ${rowNum}] Error processing row after ${attempts} attempts:`,
+              err,
+            );
+            logToFile(
+              `[Row ${rowNum}] FAILED after ${attempts} attempts. Error: ${err?.message || String(err)}`,
+            );
             break;
           }
         }
